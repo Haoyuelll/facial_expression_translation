@@ -1,13 +1,12 @@
+import json
 import numpy as np
 import torch
-from torch import tensor
-# from torch._C import device
+import util.util as util
+# import os
 from .base_model import BaseModel
 from . import networks
 from .patchnce import PatchNCELoss
-import util.util as util
-import cv2
-import os
+from . import perceptual_model
 
 
 class CUTModel(BaseModel):
@@ -29,7 +28,7 @@ class CUTModel(BaseModel):
         parser.add_argument('--lambda_NCE', type=float, default=1.0, help='weight for NCE loss: NCE(G(X), X)')
         parser.add_argument('--lambda_VGG_perceptual', type=float, default=1.0, help='weight for vgg perceptual loss: NCE(G(X), X)')
         parser.add_argument('--lambda_L1_masked', type=float, default=0.1, help='weight for L1 loss: NCE(G(X), X)')
-        parser.add_argument('--nce_idt', type=util.str2bool, nargs='?', default=False, help='use NCE loss for identity mapping: NCE(G(Y), Y))')
+        parser.add_argument('--nce_idt', type=util.str2bool, default=False, help='use NCE loss for identity mapping: NCE(G(Y), Y))')
         parser.add_argument('--nce_layers', type=str, default='0,4,8,12,16', help='compute NCE loss on which layers')
         parser.add_argument('--nce_includes_all_negatives_from_minibatch',
                             type=util.str2bool, nargs='?', const=True, default=False,
@@ -42,14 +41,15 @@ class CUTModel(BaseModel):
                             type=util.str2bool, nargs='?', const=True, default=False,
                             help="Enforce flip-equivariance as additional regularization. It's used by FastCUT, but not CUT")
         parser.add_argument('--loss_mode', type=int, default=1, help='1: GAN, VGG_perceptual, L1_masked; 2: GAN, NCE, VGG_perceptual(masked); 3: GAN, NCE, NCE_Y (original)')
-
+        parser.add_argument('--use_dataset_device', type=util.str2bool, default=False, help='using device from masked dataset')
         parser.set_defaults(pool_size=0)  # no image pooling
 
         opt, _ = parser.parse_known_args()
 
         # Set default parameters for CUT and FastCUT
         if opt.CUT_mode.lower() == "cut":
-            parser.set_defaults(nce_idt=True, lambda_NCE=1.0)
+            if opt.dataset_mode != "masked":
+                parser.set_defaults(nce_idt=True, lambda_NCE=1.0)
         elif opt.CUT_mode.lower() == "fastcut":
             parser.set_defaults(
                 nce_idt=False, lambda_NCE=10.0, flip_equivariance=True,
@@ -60,19 +60,35 @@ class CUTModel(BaseModel):
 
         return parser
 
-    def __init__(self, opt):
+    def __init__(self, opt, device=None):
         BaseModel.__init__(self, opt)
 
         # specify the training losses you want to print out.
         # The training/test scripts will call <BaseModel.get_current_losses>
-        os.environ['TORCH_HOME'] = "/home6/liuhy/torch_home"
-        self.loss_names = ['G_GAN', 'D_real', 'D_fake', 'G', 'NCE', 'VGG_perceptual', 'L1_masked']
+        # os.environ['TORCH_HOME'] = "/home6/liuhy/torch_home"
+        self.loss_names = ['G_GAN', 'D_real', 'D_fake', 'G', 'NCE']
         self.visual_names = ['real_A', 'fake_B', 'real_B']
         self.nce_layers = [int(i) for i in self.opt.nce_layers.split(',')]
+        if device is not None and opt.use_dataset_device:
+            self.device = device
+            print("Using device from masked_dataset: ", device)
+        else: print("Using device ", self.device)
+        
+        if opt.loss_mode == 1:
+            self.loss_names += ['L1_masked', 'VGG_perceptual']
+            self.visual_names += ['masked_B']
+        elif opt.loss_mode == 2:
+            self.loss_names += ['VGG_perceptual']
+            self.visual_names += ['background_B', 'face_B']
+        elif opt.loss_mode == 3:
+            opt.nce_idt = True
 
         if opt.nce_idt and self.isTrain:
             self.loss_names += ['NCE_Y']
             self.visual_names += ['idt_B']
+
+        # print('Current loss: ', loss for loss in self.loss_names)
+        # print('Visualization: ', visual for visual in self.visual_names)
 
         if self.isTrain:
             self.model_names = ['G', 'F', 'D']
@@ -82,6 +98,8 @@ class CUTModel(BaseModel):
         # define networks (both generator and discriminator)
         self.netG = networks.define_G(opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.normG, not opt.no_dropout, opt.init_type, opt.init_gain, opt.no_antialias, opt.no_antialias_up, self.gpu_ids, opt)
         self.netF = networks.define_F(opt.input_nc, opt.netF, opt.normG, not opt.no_dropout, opt.init_type, opt.init_gain, opt.no_antialias, self.gpu_ids, opt)
+        self.netF_vgg = [networks.define_F(opt.input_nc, opt.netF, opt.normG, not opt.no_dropout, opt.init_type, opt.init_gain, opt.no_antialias, self.gpu_ids, opt)
+                         for i in range(4)]
 
         if self.isTrain:
             self.netD = networks.define_D(opt.output_nc, opt.ndf, opt.netD, opt.n_layers_D, opt.normD, opt.init_type, opt.init_gain, opt.no_antialias, self.gpu_ids, opt)
@@ -99,9 +117,8 @@ class CUTModel(BaseModel):
             self.optimizers.append(self.optimizer_G)
             self.optimizers.append(self.optimizer_D)
 
-        from . import perceptual_model
-        self.vgg_perceptual = perceptual_model.VGG16_for_Perceptual()
-        self.vgg_perceptual.to(f'cuda:{self.opt.gpu_ids[0]}')
+        self.vgg_perceptual = perceptual_model.VGG16_for_Perceptual().to(self.device)
+        torch.set_printoptions(profile="full")
 
     def data_dependent_initialize(self, data):
         """
@@ -154,8 +171,13 @@ class CUTModel(BaseModel):
         AtoB = self.opt.direction == 'AtoB'
         self.real_A = input['A' if AtoB else 'B'].to(self.device)
         self.real_B = input['B' if AtoB else 'A'].to(self.device)
-        self.bbox_A = input['A_mask' if AtoB else 'B_mask'].to(self.device)
-        self.bbox_B = input['B_mask' if AtoB else 'A_mask'].to(self.device)
+
+        if self.opt.dataset_mode == 'masked':
+            A_box = input['A_box']
+            scale_size = int(self.real_A.shape[2])
+            self.bbox_A = self.box2tensor(A_box, (1, 3, scale_size, scale_size)).to(self.device)
+            self.mask_A = torch.ones_like(self.bbox_A, device=self.bbox_A.device) - self.bbox_A
+
         self.image_paths = input['A_paths' if AtoB else 'B_paths']
 
     def forward(self):
@@ -198,9 +220,13 @@ class CUTModel(BaseModel):
 
         if self.opt.lambda_NCE > 0.0:
             if self.opt.loss_mode == 2:
+                self.background_A = self.real_A * self.bbox_A + self.mask_A * (-1)
+                self.background_B = self.fake_B * self.bbox_A + self.mask_A * (-1)
+                self.loss_NCE = self.calculate_NCE_loss(self.background_A, self.background_B)
+            elif self.opt.loss_mode == 1 or self.opt.loss_mode == 3:
                 self.loss_NCE = self.calculate_NCE_loss(self.real_A, self.fake_B)
-            elif self.opt.loss_mode == 3:
-                self.loss_NCE = self.calculate_NCE_loss(self.real_A, self.fake_B)
+            else:
+                self.loss_NCE = 0
         else:
             self.loss_NCE, self.loss_NCE_bd = 0.0, 0.0
 
@@ -215,14 +241,19 @@ class CUTModel(BaseModel):
             if self.opt.loss_mode == 1:
                 self.loss_VGG_perceptual = self.calculate_perceptual_loss(self.real_A, self.fake_B)
             elif self.opt.loss_mode == 2:
-                masked_A = self.bbox_A * self.bbox_A
-                masked_B = self.fake_B * self.bbox_A
-                self.loss_VGG_perceptual = self.calculate_perceptual_loss(masked_A, masked_B)
+                self.face_A = self.real_A * self.mask_A + self.bbox_A * (-1)
+                self.face_B = self.fake_B * self.mask_A + self.bbox_A * (-1)
+                self.loss_VGG_perceptual = self.calculate_perceptual_loss(self.face_A.to(self.device), self.face_B.to(self.device))
+            else:
+                self.loss_VGG_perceptual = self.calculate_perceptual_loss(self.real_A, self.fake_B)
         else:
             self.loss_VGG_perceptual = 0.0
 
         if self.opt.lambda_L1_masked > 0.0:
-            self.loss_L1_masked = self.calculate_masked_loss(self.real_A, self.fake_B, self.bbox_A) * self.opt.lambda_L1_masked
+            if self.opt.loss_mode == 1:
+                self.loss_L1_masked = self.calculate_masked_loss(self.real_A, self.fake_B, self.bbox_A) * self.opt.lambda_L1_masked
+            else: 
+                self.loss_L1_masked = 0.0
         else:
             self.loss_L1_masked = 0.0
 
@@ -249,15 +280,15 @@ class CUTModel(BaseModel):
 
     def calculate_perceptual_loss(self, src, tgt):
         n_layers = len(self.nce_layers)
-        feat_k = [src]
-        for h in self.vgg_perceptual.forward(src):
-            feat_k.append(h)
-        feat_k_pool, sample_ids = self.netF(feat_k, self.opt.num_patches, None)
-
-        feat_q = [tgt]
-        for h in self.vgg_perceptual.forward(tgt):
-            feat_q.append(h)
-        feat_q_pool, _ = self.netF(feat_q, self.opt.num_patches, sample_ids)
+        feat_k_pool = []
+        for i, feat_k in enumerate(self.vgg_perceptual.forward(src)):
+            k = self.netF_vgg[i]([feat_k], self.opt.num_patches, None)[0][0]
+            feat_k_pool.append(k)
+    
+        feat_q_pool = []
+        for i, feat_q in enumerate(self.vgg_perceptual.forward(tgt)):
+            q = self.netF_vgg[i]([feat_q], self.opt.num_patches, None)[0][0]
+            feat_q_pool.append(q)
 
         total_vgg_loss = 0.0
 
@@ -268,26 +299,20 @@ class CUTModel(BaseModel):
         return total_vgg_loss / n_layers
 
     def calculate_masked_loss(self, A, B, bbox):
-        masked_A = A * bbox
-        masked_B = B * bbox
-        # npA = util.tensor2im(masked_A)
-        # npB = util.tensor2im(masked_B)
-        # util.save_image(npA, '/home6/liuhy/contrastive-unpaired-translation/test/npA_test.png')
-        # util.save_image(npB, '/home6/liuhy/contrastive-unpaired-translation/test/npB_test.png')
-        return torch.nn.L1Loss()(masked_A, masked_B)
+        self.masked_A = A * bbox
+        self.masked_B = B * bbox
+        l1 = torch.nn.L1Loss().to(self.device)
+        return l1(self.masked_A.to(self.device), self.masked_B.to(self.device))
 
+    def box2tensor(self, box, shape):
+        image_tensor = torch.ones(shape).to(self.device)
+        box = json.loads(box[0])
+        xmin, ymin, xmax, ymax = box
+        black = torch.zeros((1, 3, ymax - ymin + 1, xmax - xmin + 1),device=self.device)
+        try:
+            image_tensor[:, :, ymin : ymax + 1, xmin : xmax + 1] = black
+        except:
+            print('Cannot deal with shape [', xmin, ymin, xmax, ymax, '] when converting bbox into tensor')
+        return image_tensor
 
-# torch.Size([1, 64, 256, 256])
-# torch.Size([1, 64, 256, 256])
-# torch.Size([1, 256, 64, 64])
-# torch.Size([1, 512, 32, 32])
-
-# 两种方案
-#   1. 每个src,tgt过vgg后四个feat_q&k，过4个netF(确认不同大小会不会对netF有影响）
-#   2. 后两维upsample到512，cat到第一维，变成1，XXX
-# L1：提人脸关键点（68）包围和, mask内部不算L1只算外部
-
-# 68 keypoints through mtcnn / face alignment
-# bbox of 5 guan both A&B, 求并集
-# in result show the bounding box
-# delete idt_B
+# python train.py --dataroot ./datasets/motion_dataset --name SPF_sad_5 --CUT_mode CUT --gpu_ids 4 --display_id -1 --dataset_mode masked --lambda_VGG_perceptual 0.1 --lambda_L1_masked 0 --loss_mode 2

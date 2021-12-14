@@ -1,19 +1,33 @@
 import time
+from numpy import isin
 import torch
-import os
+# import os
+from data.masked_dataset import MaskedDataset
 from options.train_options import TrainOptions
 from data import create_dataset
 from models import create_model
 from util.visualizer import Visualizer
+import random
+import numpy as np
 
 
 if __name__ == '__main__':
-    os.environ['TORCH_HOME'] = "/home6/liuhy/torch_home"
+    torch.autograd.set_detect_anomaly(True)
+    torch.manual_seed(0)
+    random.seed(0)
+    np.random.seed(0)
+
+    # When loading model from certain directory
+    # os.environ['TORCH_HOME'] = "/home6/liuhy/torch_home"
 
     opt = TrainOptions().parse()   # get training options
     dataset = create_dataset(opt)  # create a dataset given opt.dataset_mode and other options
     dataset_size = len(dataset)    # get the number of images in the dataset.
 
+    # if isinstance(dataset, MaskedDataset) and opt.use_dataset_device:
+    #     model = create_model(opt, dataset.device)
+    # else:
+    #     model = create_model(opt)      # create a model given opt.model and other options
     model = create_model(opt)      # create a model given opt.model and other options
     print('The number of training images = %d' % dataset_size)
 
@@ -80,5 +94,5 @@ if __name__ == '__main__':
         model.update_learning_rate()                     # update learning rates at the end of every epoch.
 
 '''
-python train.py --dataroot ./datasets/motion_dataset/motion_dataset_aligned --name SPF_sad_test --CUT_mode CUT --gpu_ids 1 --display_id -1 --dataset_mode masked --update_html_freq 100
+python train.py --dataroot ./datasets/motion_dataset/motion_dataset_aligned --name SPF_sad_test --CUT_mode CUT --gpu_ids 1 --display_id -1 --dataset_mode masked --lambda_NCE 0 --mask_start 17 --mask_end 68 --update_html_freq 100 
 '''
