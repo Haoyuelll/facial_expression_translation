@@ -176,10 +176,17 @@ class MaskedDataset(BaseDataset):
         img = Image.open(paths[0])
         image_w = img.width
 
-        if not os.path.isfile(f'{rootdir}/train{domain}/boxes.json'):
-            os.mknod(f'{rootdir}/train{domain}/boxes.json')
+        if self.opt.mask_start == 0 and self.opt.mask_end == 27:
+            mode = '1'
+        elif self.opt.mask_start == 17 and self.opt.mask_end == 68:
+            mode = '2'
+        else:
+            mode = '3'
 
-        with open(f'{rootdir}/train{domain}/boxes.json', 'r+') as box_file:
+        if not os.path.isfile(f'{rootdir}/train{domain}/bbox_{mode}.json'):
+            os.mknod(f'{rootdir}/train{domain}/bbox_{mode}.json')
+
+        with open(f'{rootdir}/train{domain}/bbox_{mode}.json', 'r+') as box_file:
             try:
                 box_dict = json.load(box_file)
                 # raise json.decoder.JSONDecodeError('msg', 'msd', 2)
@@ -200,9 +207,11 @@ class MaskedDataset(BaseDataset):
                     try:
                         lms68 = np.load(f'{rootdir}/train{domain}_lms/{name[:-4]}.npy')
                         x, y = self.calc_center(0, 17, lms68)
-                        if x < image_w / 4 or x > image_w / 4 * 3 or x * y < 0:
+                        if x < image_w / 4 or x > image_w / 4 * 3:
                             raise UserWarning
                     except:
+                        if i % 100 == 0:
+                            print(f'Calculating landmarks  {i}/{size}')
                         if not os.path.isdir(f'{rootdir}/train{domain}_lms'):
                             os.mkdir(f'{rootdir}/train{domain}_lms')
                         self.device = f'cuda:{self.opt.gpu_ids[0]}' if self.opt.gpu_ids else 'cpu'
@@ -218,7 +227,7 @@ class MaskedDataset(BaseDataset):
                                 if x > image_w / 4 and x < image_w / 4 * 3:
                                     break
                         np.save(f'{rootdir}/train{domain}_lms/{name[:-4]}.npy', lms68)
-                    bbox = self.return_BBox(self.opt.mask_start, self.opt.mask_end, lms68)
+                    bbox = self.return_BBox(lms68, self.opt.mask_start, self.opt.mask_end)
                     box_dict[name] = bbox
                 boxes.append(bbox)
             json.dump(box_dict, box_file)

@@ -60,7 +60,7 @@ class CUTModel(BaseModel):
 
         return parser
 
-    def __init__(self, opt, device=None):
+    def __init__(self, opt):
         BaseModel.__init__(self, opt)
 
         # specify the training losses you want to print out.
@@ -69,10 +69,7 @@ class CUTModel(BaseModel):
         self.loss_names = ['G_GAN', 'D_real', 'D_fake', 'G', 'NCE']
         self.visual_names = ['real_A', 'fake_B', 'real_B']
         self.nce_layers = [int(i) for i in self.opt.nce_layers.split(',')]
-        if device is not None and opt.use_dataset_device:
-            self.device = device
-            print("Using device from masked_dataset: ", device)
-        else: print("Using device ", self.device)
+        print("Using device ", self.device)
         
         if opt.loss_mode == 1:
             self.loss_names += ['L1_masked', 'VGG_perceptual']
@@ -135,8 +132,9 @@ class CUTModel(BaseModel):
         if self.opt.isTrain:
             self.compute_D_loss().backward()                  # calculate gradients for D
             self.compute_G_loss().backward()                   # calculate graidents for G
-            if self.opt.lambda_NCE > 0.0 or self.opt.lambda_VGG_perceptual > 0:
+            if self.opt.lambda_NCE > 0.0:
                 self.optimizer_F = torch.optim.Adam(self.netF.parameters(), lr=self.opt.lr, betas=(self.opt.beta1, self.opt.beta2))
+                print(type(self.optimizer_F), self.optimizer_F)
                 self.optimizers.append(self.optimizer_F)
 
     def optimize_parameters(self):
@@ -153,12 +151,12 @@ class CUTModel(BaseModel):
         # update G
         self.set_requires_grad(self.netD, False)
         self.optimizer_G.zero_grad()
-        if self.opt.netF == 'mlp_sample':
+        if self.opt.lambda_NCE > 0.0 and self.opt.netF == 'mlp_sample':
             self.optimizer_F.zero_grad()
         self.loss_G = self.compute_G_loss()
         self.loss_G.backward()
         self.optimizer_G.step()
-        if self.opt.netF == 'mlp_sample':
+        if self.opt.lambda_NCE > 0.0 and self.opt.netF == 'mlp_sample':
             self.optimizer_F.step()
 
     def set_input(self, input):
@@ -219,14 +217,7 @@ class CUTModel(BaseModel):
             self.loss_G_GAN = 0.0
 
         if self.opt.lambda_NCE > 0.0:
-            if self.opt.loss_mode == 2:
-                self.background_A = self.real_A * self.bbox_A + self.mask_A * (-1)
-                self.background_B = self.fake_B * self.bbox_A + self.mask_A * (-1)
-                self.loss_NCE = self.calculate_NCE_loss(self.background_A, self.background_B)
-            elif self.opt.loss_mode == 1 or self.opt.loss_mode == 3:
-                self.loss_NCE = self.calculate_NCE_loss(self.real_A, self.fake_B)
-            else:
-                self.loss_NCE = 0
+            self.loss_NCE = self.calculate_NCE_loss(self.real_A, self.fake_B)
         else:
             self.loss_NCE, self.loss_NCE_bd = 0.0, 0.0
 
@@ -252,9 +243,13 @@ class CUTModel(BaseModel):
         if self.opt.lambda_L1_masked > 0.0:
             if self.opt.loss_mode == 1:
                 self.loss_L1_masked = self.calculate_masked_loss(self.real_A, self.fake_B, self.bbox_A) * self.opt.lambda_L1_masked
-            else: 
-                self.loss_L1_masked = 0.0
-        else:
+            elif self.opt.loss_mode == 2:
+                self.background_A = self.real_A * self.bbox_A + self.mask_A * (-1)
+                self.background_B = self.fake_B * self.bbox_A + self.mask_A * (-1)
+                self.loss_L1_masked = torch.nn.L1Loss().to(self.device)(self.background_A, self.background_B) * self.opt.lambda_L1_masked
+            else:
+                self.loss_L1_masked = 0
+        else: 
             self.loss_L1_masked = 0.0
 
         self.loss_G = self.loss_G_GAN + self.loss_L1_masked + self.loss_VGG_perceptual + loss_NCE_both
@@ -299,20 +294,20 @@ class CUTModel(BaseModel):
         return total_vgg_loss / n_layers
 
     def calculate_masked_loss(self, A, B, bbox):
-        self.masked_A = A * bbox
+        masked_A = A * bbox
         self.masked_B = B * bbox
         l1 = torch.nn.L1Loss().to(self.device)
-        return l1(self.masked_A.to(self.device), self.masked_B.to(self.device))
+        return l1(masked_A, self.masked_B)
 
     def box2tensor(self, box, shape):
         image_tensor = torch.ones(shape).to(self.device)
         box = json.loads(box[0])
         xmin, ymin, xmax, ymax = box
-        black = torch.zeros((1, 3, ymax - ymin + 1, xmax - xmin + 1),device=self.device)
+        blank = torch.zeros((1, 3, ymax - ymin + 1, xmax - xmin + 1),device=self.device)
         try:
-            image_tensor[:, :, ymin : ymax + 1, xmin : xmax + 1] = black
+            image_tensor[:, :, ymin : ymax + 1, xmin : xmax + 1] = blank
         except:
-            print('Cannot deal with shape [', xmin, ymin, xmax, ymax, '] when converting bbox into tensor')
+            raise UserWarning('Invalid bbox shape [', xmin, ymin, xmax, ymax, ']')
         return image_tensor
 
 # python train.py --dataroot ./datasets/motion_dataset --name SPF_sad_5 --CUT_mode CUT --gpu_ids 4 --display_id -1 --dataset_mode masked --lambda_VGG_perceptual 0.1 --lambda_L1_masked 0 --loss_mode 2
