@@ -80,6 +80,7 @@ class MaskedDataset(BaseDataset):
         self.A_size = len(self.A_paths)  # get the size of dataset A
         self.B_size = len(self.B_paths)  # get the size of dataset B
         self.A_masks = self.mask_face('A', opt.dataroot, self.A_paths)  # get the bounding box for images in dataset A
+        self.B_masks = self.mask_face('B', opt.dataroot, self.B_paths)  # get the bounding box for images in dataset A
 
     def __getitem__(self, index):
         """Return a data point and its metadata information.
@@ -102,6 +103,7 @@ class MaskedDataset(BaseDataset):
         else:   # randomize the index for domain B to avoid fixed pairs.
             index_B = random.randint(0, self.B_size - 1)
         B_path = self.B_paths[index_B]
+        B_box = self.B_masks[index_B]
         A_img = Image.open(A_path).convert('RGB')
         B_img = Image.open(B_path).convert('RGB')
         scale_size = 256
@@ -109,9 +111,10 @@ class MaskedDataset(BaseDataset):
         A = img2tensor(A_img)
         B = img2tensor(B_img)
         A_box = [int(float(i) / A_img.width * scale_size) for i in A_box]
-        A_box = str(A_box)
+        B_box = [int(float(i) / B_img.width * scale_size) for i in B_box]
+        A_box, B_box = str(A_box), str(B_box)
 
-        return {'A': A, 'B': B, 'A_paths': A_path, 'B_paths': B_path, 'A_box': A_box}
+        return {'A': A, 'B': B, 'A_paths': A_path, 'B_paths': B_path, 'A_box': A_box, 'B_box': B_box}
 
     def __len__(self):
         """Return the total number of images in the dataset.
@@ -175,7 +178,6 @@ class MaskedDataset(BaseDataset):
         size = len(paths)
         img = Image.open(paths[0])
         image_w = img.width
-
         if self.opt.mask_start == 0 and self.opt.mask_end == 27:
             mode = '1'
         elif self.opt.mask_start == 17 and self.opt.mask_end == 68:

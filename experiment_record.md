@@ -46,7 +46,7 @@
 
 - **diff:** changing loss mode 2: calculate masked L1 loss of the background 
 
-- **start_time:** 17:20, Dec 15
+- **start_time:** 17:20, Dec 15 - 13:58, Dec 16
 
 - **tmux:** face1
 
@@ -62,7 +62,7 @@
 
 - **diff:** changing lambda
 
-- **start_time:** 17:20, Dec 15
+- **start_time:** 17:20, Dec 15 - 13:58, Dec 16
 
 - **tmux:** face2
 
@@ -72,13 +72,13 @@
 
   
 
-### SPF_sad_4: 
+### SPF_sad_7: 
 
 - **loss:** loss_G_GAN * 1.0 + loss_vgg_perceptual * 1.0 + loss_masked_L1* 1.0
 
 - **diff:** changing lambda
 
-- **start_time:** 17:20, Dec 15
+- **start_time:** 17:20, Dec 15 - 13:58, Dec 16
 
 - **tmux:** face4
 

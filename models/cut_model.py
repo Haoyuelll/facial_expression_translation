@@ -1,6 +1,7 @@
 import json
 import numpy as np
 import torch
+from torch.nn import parameter
 import util.util as util
 # import os
 from .base_model import BaseModel
@@ -70,7 +71,7 @@ class CUTModel(BaseModel):
         self.visual_names = ['real_A', 'fake_B', 'real_B']
         self.nce_layers = [int(i) for i in self.opt.nce_layers.split(',')]
         print("Using device ", self.device)
-        
+
         if opt.loss_mode == 1:
             self.loss_names += ['L1_masked', 'VGG_perceptual']
             self.visual_names += ['masked_B']
@@ -134,7 +135,6 @@ class CUTModel(BaseModel):
             self.compute_G_loss().backward()                   # calculate graidents for G
             if self.opt.lambda_NCE > 0.0:
                 self.optimizer_F = torch.optim.Adam(self.netF.parameters(), lr=self.opt.lr, betas=(self.opt.beta1, self.opt.beta2))
-                print(type(self.optimizer_F), self.optimizer_F)
                 self.optimizers.append(self.optimizer_F)
 
     def optimize_parameters(self):
@@ -160,8 +160,7 @@ class CUTModel(BaseModel):
             self.optimizer_F.step()
 
     def set_input(self, input):
-        """
-        Unpack input data from the dataloader and perform necessary pre-processing steps.
+        """ Unpack input data from the dataloader and perform necessary pre-processing steps.
         Parameters:
             input (dict): include the data itself and its metadata information.
         The option 'direction' can be used to swap domain A and domain B.
@@ -175,12 +174,17 @@ class CUTModel(BaseModel):
             scale_size = int(self.real_A.shape[2])
             self.bbox_A = self.box2tensor(A_box, (1, 3, scale_size, scale_size)).to(self.device)
             self.mask_A = torch.ones_like(self.bbox_A, device=self.bbox_A.device) - self.bbox_A
-
+            B_box = input['B_box']
+            scale_size = int(self.real_B.shape[2])
+            self.bbox_B = self.box2tensor(B_box, (1, 3, scale_size, scale_size)).to(self.device)
+            self.mask_B = torch.ones_like(self.bbox_B, device=self.bbox_B.device) - self.bbox_B
         self.image_paths = input['A_paths' if AtoB else 'B_paths']
 
     def forward(self):
         """Run forward pass; called by both functions <optimize_parameters> and <test>."""
-        self.real = torch.cat((self.real_A, self.real_B), dim=0) if self.opt.nce_idt and self.opt.isTrain else self.real_A
+        face_rA = self.real_A * self.mask_A + self.bbox_A * (-1)
+        face_rB = self.real_B * self.mask_B + self.bbox_B * (-1)    # feeding only face to netG to generate fake_B
+        self.real = torch.cat((face_rA, face_rB), dim=0) if self.opt.nce_idt and self.opt.isTrain else self.real_A
         if self.opt.flip_equivariance:
             self.flipped_for_equivariance = self.opt.isTrain and (np.random.random() < 0.5)
             if self.flipped_for_equivariance:
@@ -249,7 +253,7 @@ class CUTModel(BaseModel):
                 self.loss_L1_masked = torch.nn.L1Loss().to(self.device)(self.background_A, self.background_B) * self.opt.lambda_L1_masked
             else:
                 self.loss_L1_masked = 0
-        else: 
+        else:
             self.loss_L1_masked = 0.0
 
         self.loss_G = self.loss_G_GAN + self.loss_L1_masked + self.loss_VGG_perceptual + loss_NCE_both
@@ -279,7 +283,7 @@ class CUTModel(BaseModel):
         for i, feat_k in enumerate(self.vgg_perceptual.forward(src)):
             k = self.netF_vgg[i]([feat_k], self.opt.num_patches, None)[0][0]
             feat_k_pool.append(k)
-    
+
         feat_q_pool = []
         for i, feat_q in enumerate(self.vgg_perceptual.forward(tgt)):
             q = self.netF_vgg[i]([feat_q], self.opt.num_patches, None)[0][0]
@@ -300,14 +304,17 @@ class CUTModel(BaseModel):
         return l1(masked_A, self.masked_B)
 
     def box2tensor(self, box, shape):
+        """ Convert the 4 points in bbox into a tensor, 0 for points inside box and 1 elsewhere """
         image_tensor = torch.ones(shape).to(self.device)
         box = json.loads(box[0])
         xmin, ymin, xmax, ymax = box
-        blank = torch.zeros((1, 3, ymax - ymin + 1, xmax - xmin + 1),device=self.device)
+        xmax = shape[2] - 1 if xmax >= shape[2] else xmax
+        ymax = shape[2] - 1 if ymax >= shape[2] else ymax  # avoid the points from exceeding the upper bound
+        blank = torch.zeros((1, 3, ymax - ymin + 1, xmax - xmin + 1), device=self.device)
         try:
-            image_tensor[:, :, ymin : ymax + 1, xmin : xmax + 1] = blank
+            image_tensor[:, :, ymin: ymax + 1, xmin: xmax + 1] = blank
         except:
-            raise UserWarning('Invalid bbox shape [', xmin, ymin, xmax, ymax, ']')
+            raise UserWarning('Invalid bbox shape [' + str(xmin, ymin, xmax, ymax) + ']')
         return image_tensor
 
 # python train.py --dataroot ./datasets/motion_dataset --name SPF_sad_5 --CUT_mode CUT --gpu_ids 4 --display_id -1 --dataset_mode masked --lambda_VGG_perceptual 0.1 --lambda_L1_masked 0 --loss_mode 2
